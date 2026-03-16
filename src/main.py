@@ -1,15 +1,12 @@
-
+import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import os
 from fpdf import FPDF
+import io
+import os
 
-# 1. CONFIGURACIÓN INICIAL
-# Creamos las carpetas si no existen para evitar errores
-os.makedirs('data', exist_ok=True)
-os.makedirs('output', exist_ok=True)
-
+# --- CLASE DE PROCESAMIENTO BIOMECÁNICO ---
 class BiomecanicaDashboard:
     def __init__(self):
         # Mapeo de ejes según tu especificación técnica
@@ -18,129 +15,130 @@ class BiomecanicaDashboard:
             'Rotation (Y)': 'Angle Y(°)',
             'Drop (Z)': 'Angle Z(°)'
         }
-        # Valores ideales de ROM (grados) basados en manuales RFEC Nivel II/III
-        self.ideales = {
-            'Tilt (X)': 2.0, 
-            'Rotation (Y)': 4.0, 
-            'Drop (Z)': 4.0
-        }
+        # Valores ideales de ROM (grados)
+        self.ideales = {'Tilt (X)': 2.0, 'Rotation (Y)': 4.0, 'Drop (Z)': 4.0}
 
-    def calcular_rom(self, file_path):
-        """Lee el CSV y calcula el Rango de Movimiento (ROM)"""
-        if not os.path.exists(file_path):
-            print(f"⚠️ Archivo no encontrado: {file_path}. Saltando...")
-            return {k: 0.0 for k in self.ejes.keys()}
-        
-        try:
-            df = pd.read_csv(file_path, skipinitialspace=True)
-            resultados = {}
-            for nombre, col in self.ejes.items():
-                # Normalizamos restando la media para medir solo la oscilación
+    def calcular_rom(self, df):
+        """Calcula el Range of Motion (95-5 percentil)"""
+        resultados = {}
+        for nombre, col in self.ejes.items():
+            if col in df.columns:
                 datos_centrados = df[col] - df[col].mean()
-                # Usamos percentiles 5 y 95 para eliminar picos de ruido del sensor
                 rom = np.percentile(datos_centrados, 95) - np.percentile(datos_centrados, 5)
                 resultados[nombre] = round(float(rom), 2)
-            return resultados
-        except Exception as e:
-            print(f"❌ Error procesando {file_path}: {e}")
-            return {k: 0.0 for k in self.ejes.keys()}
+            else:
+                resultados[nombre] = 0.0
+        return resultados
 
-    def generar_reporte_pdf(self, df_comparativo, radar_path, nombre_archivo):
-        """Crea un PDF profesional con los resultados"""
+    def generar_pdf_bytes(self, df_comparativo):
+        """Genera el PDF en memoria y devuelve los bytes (Sin guardar en disco)"""
         pdf = FPDF()
         pdf.add_page()
-        
-        # Título
         pdf.set_font("Arial", 'B', 16)
         pdf.cell(0, 15, "INFORME BIOMECÁNICO DE ESTABILIDAD PÉLVICA", ln=True, align='C')
         pdf.ln(5)
 
         # Tabla de Datos
-        pdf.set_font("Arial", 'B', 11)
+        pdf.set_font("Arial", 'B', 10)
         pdf.set_fill_color(230, 230, 230)
         headers = ["Condición", "Eje", "PRE", "POST", "Mejora"]
         for h in headers:
             pdf.cell(38, 10, h, 1, 0, 'C', True)
         pdf.ln()
 
-        pdf.set_font("Arial", '', 10)
+        pdf.set_font("Arial", '', 9)
         for _, row in df_comparativo.iterrows():
-            pdf.cell(38, 9, str(row['Condición']), 1)
-            pdf.cell(38, 9, str(row['Parámetro']), 1)
-            pdf.cell(38, 9, str(row['PRE']), 1)
-            pdf.cell(38, 9, str(row['POST']), 1)
+            pdf.cell(38, 8, str(row['Condición']), 1)
+            pdf.cell(38, 8, str(row['Parámetro']), 1)
+            pdf.cell(38, 8, str(row['PRE']), 1)
+            pdf.cell(38, 8, str(row['POST']), 1)
             
-            # Color verde si mejora (ROM baja), rojo si empeora
             diff = row['Mejora']
-            if diff >= 0:
-                pdf.set_text_color(0, 128, 0) # Verde
-            else:
-                pdf.set_text_color(200, 0, 0) # Rojo
-            pdf.cell(38, 9, str(diff), 1, ln=True)
+            if diff >= 0: pdf.set_text_color(0, 128, 0)
+            else: pdf.set_text_color(200, 0, 0)
+            pdf.cell(38, 8, str(diff), 1, ln=True)
             pdf.set_text_color(0, 0, 0)
 
-        # Gráfico de Radar
-        if os.path.exists(radar_path):
-            pdf.ln(10)
-            pdf.set_font("Arial", 'B', 12)
-            pdf.cell(0, 10, "Estado Final (Llano) vs Rango Ideal", ln=True)
-            pdf.image(radar_path, x=20, w=170)
+        return pdf.output(dest='S').encode('latin-1')
 
-        pdf.output(nombre_archivo)
-        print(f"✅ PDF generado con éxito: {nombre_archivo}")
+# --- INTERFAZ STREAMLIT ---
+st.set_page_config(page_title="Hip Stability Pro", layout="wide")
+st.title("🚴‍♂️ Análisis de Estabilidad de Cadera")
+st.write("Sube tus archivos CSV para comparar la cinemática Pre y Post ajuste.")
 
-# --- BLOQUE DE EJECUCIÓN ---
-if __name__ == "__main__":
-    app = BiomecanicaDashboard()
+app = BiomecanicaDashboard()
 
-    # Definimos los nombres de archivos que deben estar en la carpeta /data
-    archivos = {
-        "Pre_Llano": "data/pre_llano.csv", "Pre_5%": "data/pre_5.csv", "Pre_10%": "data/pre_10.csv",
-        "Post_Llano": "data/post_llano.csv", "Post_5%": "data/post_5.csv", "Post_10%": "data/post_10.csv"
-    }
+# Selector de archivos en el lateral
+st.sidebar.header("Carga de Datos")
+condiciones = ["Llano", "5%", "10%"]
+archivos_pre = {}
+archivos_post = {}
 
-    # 2. PROCESAR DATOS
-    resultados_finales = {k: app.calcular_rom(v) for k, v in archivos.items()}
+for c in condiciones:
+    archivos_pre[c] = st.sidebar.file_uploader(f"PRE - {c}", type="csv", key=f"pre_{c}")
+    archivos_post[c] = st.sidebar.file_uploader(f"POST - {c}", type="csv", key=f"post_{c}")
 
-    # 3. CREAR TABLA COMPARATIVA
+if st.sidebar.button("Analizar Datos"):
+    resultados = {}
+    
+    # Procesar cada archivo subido
+    for c in condiciones:
+        # Pre
+        if archivos_pre[c]:
+            df_pre = pd.read_csv(archivos_pre[c])
+            resultados[f"Pre_{c}"] = app.calcular_rom(df_pre)
+        else:
+            resultados[f"Pre_{c}"] = {k: 0.0 for k in app.ejes.keys()}
+        
+        # Post
+        if archivos_post[c]:
+            df_post = pd.read_csv(archivos_post[c])
+            resultados[f"Post_{c}"] = app.calcular_rom(df_post)
+        else:
+            resultados[f"Post_{c}"] = {k: 0.0 for k in app.ejes.keys()}
+
+    # Crear Tabla Comparativa
     lista_tabla = []
-    for cond, label in [("Llano", "Llano"), ("5%", "Subida 5%"), ("10%", "Subida 10%")]:
+    for c in condiciones:
         for eje in app.ejes.keys():
-            pre = resultados_finales[f"Pre_{cond}"][eje]
-            post = resultados_finales[f"Post_{cond}"][eje]
+            pre = resultados[f"Pre_{c}"][eje]
+            post = resultados[f"Post_{c}"][eje]
             lista_tabla.append({
-                "Condición": label,
-                "Parámetro": eje,
-                "PRE": pre,
-                "POST": post,
-                "Mejora": round(pre - post, 2)
+                "Condición": c, "Parámetro": eje,
+                "PRE": pre, "POST": post, "Mejora": round(pre - post, 2)
             })
     
     df_final = pd.DataFrame(lista_tabla)
 
-    # 4. GENERAR GRÁFICA DE RADAR (POST LLANO)
-    categorias = list(app.ideales.keys())
-    fig = go.Figure()
+    # Mostrar Resultados en Streamlit
+    col1, col2 = st.columns([2, 1])
     
-    # Datos actuales
-    fig.add_trace(go.Scatterpolar(
-        r=[resultados_finales["Post_Llano"][c] for c in categorias],
-        theta=categorias, fill='toself', name='Post-Fit'
-    ))
-    # Referencia ideal
-    fig.add_trace(go.Scatterpolar(
-        r=list(app.ideales.values()),
-        theta=categorias, name='Rango Ideal', line_dash='dash'
-    ))
+    with col1:
+        st.subheader("Tabla Comparativa (ROM en grados)")
+        st.dataframe(df_final, use_container_width=True)
+        
+        # Botón de descarga de PDF
+        pdf_bytes = app.generar_pdf_bytes(df_final)
+        st.download_button(
+            label="📩 Descargar Informe PDF",
+            data=pdf_bytes,
+            file_name="Reporte_Estabilidad_Cadera.pdf",
+            mime="application/pdf"
+        )
 
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 8])),
-        title="Estabilidad Final vs Ideal (Menos es mejor)"
-    )
-    
-    # Guardar imagen temporal para el PDF
-    radar_img = "output/radar_temp.png"
-    fig.write_image(radar_img)
-
-    # 5. EXPORTAR PDF FINAL
-    app.generar_reporte_pdf(df_final, radar_img, "output/Reporte_Biomecanico.pdf")
+    with col2:
+        st.subheader("Estado Final vs Ideal")
+        categorias = list(app.ideales.keys())
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(
+            r=[resultados["Post_Llano"][c] for c in categorias],
+            theta=categorias, fill='toself', name='Post-Fit'
+        ))
+        fig.add_trace(go.Scatterpolar(
+            r=list(app.ideales.values()),
+            theta=categorias, name='Rango Ideal', line_dash='dash'
+        ))
+        fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 8])))
+        st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Por favor, sube los archivos CSV en la barra lateral y pulsa 'Analizar Datos'.")
