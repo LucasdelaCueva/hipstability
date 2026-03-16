@@ -2,4 +2,4 @@ pandas
 numpy
 plotly
 fpdf
-kaleido==0.1.0.post1
+streamlit
